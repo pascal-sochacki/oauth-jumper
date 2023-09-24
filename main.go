@@ -15,17 +15,14 @@ import (
 	"os"
 )
 
-func getRedirectUrl(original *url.URL) string {
+func getRedirectUrl(original *url.URL, server string) string {
 	base64 := base64.StdEncoding.EncodeToString([]byte(original.String()))
 	comebackAt := &url.URL{
 		Scheme: "http",
-		Host:   "localhost:3001",
+		Host:   server,
 		Path:   "back/" + base64,
 	}
-
-	result := comebackAt.String()
-	log.Println("redirec uri", result)
-	return result
+	return comebackAt.String()
 }
 
 func main() {
@@ -37,7 +34,7 @@ func main() {
 
 	server := os.Getenv("SERVER")
 	if len(server) == 0 {
-		log.Fatal("No server configured! Set OAUTH_SERVER")
+		log.Fatal("No server configured! Set SERVER")
 	}
 
 	httpClient := &http.Client{
@@ -46,21 +43,16 @@ func main() {
 
 	http.HandleFunc("/back/", func(w http.ResponseWriter, r *http.Request) {
 		parts := strings.Split(r.URL.Path, "/")
-		log.Print(r.URL.Path)
 		if len(parts) != 3 {
-			log.Print("no there paths")
 			w.WriteHeader(http.StatusBadRequest)
 		}
 
 		urlString, err := base64.StdEncoding.DecodeString(parts[2])
 		if err != nil {
-			log.Print("could not decode url")
 			w.WriteHeader(http.StatusBadRequest)
 		}
-		log.Print(urlString)
 		original, err := url.Parse(string(urlString))
 		if err != nil {
-			log.Print("could not parse url")
 			w.WriteHeader(http.StatusBadRequest)
 		}
 		redirect := &url.URL{
@@ -69,33 +61,26 @@ func main() {
 			Path:     original.Path,
 			RawQuery: r.URL.RawQuery,
 		}
-		log.Print(redirect.String())
 		w.Header().Add("Location", redirect.String())
 		w.WriteHeader(http.StatusTemporaryRedirect)
-
 	})
 	http.HandleFunc("/realms/apps-cc/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
-		log.Println(r.URL.Path)
 		url := &url.URL{
 			Scheme: "http",
 			Host:   oauthServer,
 			Path:   r.URL.Path,
 		}
-		log.Println("request", url.String())
 		res, err := http.Get(url.String())
 		if err != nil {
-			log.Println("Got error")
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		log.Println(res.StatusCode)
 		defer res.Body.Close()
 		for key, values := range res.Header {
 			for _, value := range values {
 				w.Header().Add(key, value)
 			}
 		}
-		w.WriteHeader(res.StatusCode)
 
 		var responseData map[string]interface{}
 		decoder := json.NewDecoder(res.Body)
@@ -103,34 +88,24 @@ func main() {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		val, ok := responseData["authorization_endpoint"].(string)
-		if !ok {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		auth, err := url.Parse(val)
-		auth.Host = "localhost:3001"
-		responseData["authorization_endpoint"] = auth.String()
-
-		val, ok = responseData["token_endpoint"].(string)
-		if !ok {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		auth, err = url.Parse(val)
-		auth.Host = "localhost:3001"
-		responseData["token_endpoint"] = auth.String()
-
-		_, copyErr := io.Copy(w, res.Body)
-		if copyErr != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
+		keysToChange := []string{"authorization_endpoint", "token_endpoint"}
+		for _, key := range keysToChange {
+			val, ok := responseData[key].(string)
+			if !ok {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			auth, _ := url.Parse(val)
+			auth.Host = server
+			responseData[key] = auth.String()
 		}
 		modifiedJSON, err := json.Marshal(responseData)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
+
+		w.WriteHeader(res.StatusCode)
 		w.Write(modifiedJSON)
 	})
 	http.HandleFunc("/realms/apps-cc/protocol/openid-connect/auth", func(w http.ResponseWriter, r *http.Request) {
@@ -145,7 +120,7 @@ func main() {
 			Path:   original.Path,
 		}
 
-		query.Set("redirect_uri", getRedirectUrl(reduced))
+		query.Set("redirect_uri", getRedirectUrl(reduced, server))
 
 		redirect := &url.URL{
 			Scheme:   "http",
@@ -158,8 +133,6 @@ func main() {
 		w.WriteHeader(http.StatusTemporaryRedirect)
 	})
 	http.HandleFunc("/realms/apps-cc/protocol/openid-connect/token", func(w http.ResponseWriter, r *http.Request) {
-		log.Println(r.URL.Query())
-		log.Println(r.Header)
 		if err := r.ParseForm(); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
 		}
@@ -173,7 +146,7 @@ func main() {
 			w.WriteHeader(http.StatusBadRequest)
 		}
 
-		r.Form.Set("redirect_uri", getRedirectUrl(original))
+		r.Form.Set("redirect_uri", getRedirectUrl(original, server))
 		req, err := http.NewRequest("POST", url.String(), strings.NewReader(r.Form.Encode()))
 		for key, values := range r.Header {
 			for _, value := range values {
@@ -185,9 +158,6 @@ func main() {
 			w.WriteHeader(http.StatusBadRequest)
 		}
 
-		log.Println(r.Form)
-		log.Println("Get Token called!")
-
 		bytes, err := io.ReadAll(res.Body)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -198,7 +168,6 @@ func main() {
 				w.Header().Add(key, value)
 			}
 		}
-		log.Println(string(bytes))
 		w.WriteHeader(res.StatusCode)
 		w.Write(bytes)
 		return
